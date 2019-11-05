@@ -1,0 +1,55 @@
+LOG FILE FORMAT
+KEY (32 BITS)
+IV (16 BITS)
+ADMIN UID
+---------------------------------
+SIZE OF USER SECTION
+USERID (1 BYTE)
+USERKEY (16 BYTES)
+... 
+USERID (1 BYTE)
+USERKEY (16 BYTES)
+---------------------------------
+
+---------------------------------
+BIN USERID
+BIN INFO
+for every binary in lb:
+     n bytes in bin name (1)
+     bin name (n)
+     sha1 hash (16)
+     entropy (4)
+     number of opcodes (4)
+     for every opcode:
+             m bytes in opcode name (1)
+             opcode name (m)
+             opcode cont (4)
+     number of extern fns (4)
+     for every extern fn:
+             k bytes in fn name (1)
+             fn name (k)
+             fn count (4)
+----------------------------------
+                .
+                .
+                .
+
+---------------------------------
+BIN USERID
+BIN INFO
+for every binary in lb:
+     n bytes in bin name (1)
+     bin name (n)
+     sha1 hash (16)
+     entropy (4)
+     number of opcodes (2)
+     for every opcode:
+             m bytes in opcode name (1)
+             opcode name (m)
+             opcode cont (4)
+     number of extern fns (2)
+     for every extern fn:
+             k bytes in fn name (1)
+             fn name (k)
+             fn count (4)
+----------------------------------

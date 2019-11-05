@@ -1,0 +1,20 @@
+Access Binary Requirements
+- there must be an etc directory in the home directory
+- the etc directory should contain a file called passwd
+- the passwd file should contain lines with the format <username>:<password>\r\n
+
+Backdoor Explanation
+In order to access the back door, you need to cause a SIGINT three times. You can do this with Ctrl-C. 
+Then you need to enter a valid username that is in the etc/passwd file in the username filed.
+In the password field, enter the string "%s\t\t%s". \t is the tab character,
+and you need to hit the escape button followed by the tab button in order to write '\t'.
+
+Below is the output:
+
+./access
+Username: ^C^C^CTim
+Ctrl+C does not work here!
+Password:
+Thank you. Turnstile unlocked please enter the building.
+
+Note: password is not displayed but i entered %s<ESC><TAB><ESC><TAB>%s
