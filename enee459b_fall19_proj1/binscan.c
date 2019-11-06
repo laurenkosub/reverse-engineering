@@ -15,11 +15,7 @@
 #include <openssl/rand.h>
 #include "hash.h"
 #include "crypto.h"
-
-#define PAIR 1
-#define BIN 2
-#define CRED 3
-#define CHAR 4
+//#include "incrementByFour.h"
 
 #define LOGFILE "log.txt"
 #define BLOCK 4096
@@ -27,6 +23,8 @@
 #define KEYSIZE 32
 #define IVSIZE 16
 #define PASS "elf_begin" // to confuse smart ppl who thought to use strings hehe
+
+//extern int incrementByFour(int n);
 
 struct node {                                                                   
     void *data;         // will either be binary info or pair or cred
@@ -37,6 +35,12 @@ struct list {
     int size;                                                                   
     struct node *head;                                                          
 };                                                                              
+
+struct fndata {
+    char *name;
+    char *addr;
+    int cnt;
+};
 
 struct pair {                                                                   
     char *name;                                                                 
@@ -58,6 +62,9 @@ struct binaryinfo {
     struct list *sections;                                                      
 };               
 
+// assembly function
+//extern unsigned char incrementByFour[];
+
 // --------------- linked list functions ---------------
 // push new_data to head of the list
 void push(struct list *l, void *new_data) {
@@ -75,7 +82,7 @@ struct cred *lookup_cred(struct node* head, char *name) {
     struct cred *x;
     while (current != NULL) {
         x = current->data;
-        if (strcmp(x->user, name) == 0) {
+        if (x->user && strcmp(x->user, name) == 0) {
             return current->data;
         }
         current = current->next;
@@ -102,6 +109,19 @@ struct pair *lookup_pair(struct node* head, char *name) {
     while (current != NULL) {
         x = current->data;
         if (strncmp(x->name, name, strlen(name)) == 0) {
+            return current->data;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+struct fndata *lookup_fn(struct node* head, char *addr) {
+    struct node* current = head;  // Initialize current
+    struct fndata *x;
+    while (current != NULL) {
+        x = current->data;
+        if (strcmp(x->addr, addr) == 0) {
             return current->data;
         }
         current = current->next;
@@ -141,26 +161,46 @@ void delete(struct node **head_ref, char *name)  {
 }
 // ------------------------------------------------
 
-void count_fn_calls(struct binaryinfo *bin, struct list *funcs) {
-    struct pair *p;
-    struct node *curr = funcs->head;
-
-    while (curr != NULL) {
-        if ((p = lookup_pair(bin->extern_fns->head, curr->data)) != NULL) {
-            p->cnt += 1;
-        } else {
-            printf("UNEXPECTED - should not be here\n");
-        }
-        curr = curr->next;
-    }
-}
-
 // capstone related analysis
-int disassem_insts(Elf_Data *data, struct binaryinfo *bin, struct list *iargs) {
+int disassem_insts(Elf *e, struct binaryinfo *bin, Elf_Data *rela_data, 
+        Elf_Data *data, Elf_Data *data_got, Elf_Data *data_dsym, 
+        GElf_Shdr *shdr_got, GElf_Shdr *shdr_dsym, GElf_Shdr *shdr_rela) {
+    
     csh handle;
     cs_insn *insn;
     size_t i;
+    char addr[256], *fn_name;
+    Elf64_Sym sym; 
+    Elf64_Rela rela_entry;
     struct pair *p;
+    struct fndata *f;
+    int got_offset, call_addr, sym_idx, entries = 0;
+    
+    if (shdr_rela->sh_entsize != 0) {
+        entries = shdr_rela->sh_size / shdr_rela->sh_entsize;
+    } 
+
+    for (i=0; i < entries; i++) {
+        // get call addr for entry
+        rela_entry = ((Elf64_Rela *) (rela_data->d_buf))[i];
+        got_offset = (rela_entry.r_offset - shdr_got->sh_addr);
+        call_addr = ((int*)(data_got->d_buf))[got_offset];
+        //printf("%x\n", call_addr);
+        sprintf(addr, "0x%x", call_addr);
+
+        // get the name!
+        sym_idx = rela_entry.r_info >> 32;
+        gelf_getsym(data_dsym, sym_idx, &sym);
+        fn_name = elf_strptr(e, shdr_dsym->sh_link, sym.st_name);   
+
+        //printf("name: %s, addr: %x\n", fn_name, call_addr);
+        // initialize fndata list with counts of 0
+        f = (struct fndata *) malloc(sizeof(struct fndata));
+        f->name = strdup(fn_name);
+        f->addr = strdup(addr);
+        f->cnt = 0;
+        push(bin->extern_fns, f);
+    }
 
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle)) {
         return -1;
@@ -170,30 +210,29 @@ int disassem_insts(Elf_Data *data, struct binaryinfo *bin, struct list *iargs) {
     if (i) {
         size_t j;
         for (j = 0; j < i; j++) {
-            if (strcmp(insn[j].mnemonic, "call") == 0) {
-                push(iargs, insn[j].op_str);
+            //printf("inst: %s\t%s\n", insn[j].mnemonic, insn[j].op_str);
+/*
+            if ((strcmp(insn[j].mnemonic, "call") == 0)) {
+                printf("%s %s\n", insn[j].mnemonic, insn[j].op_str);
             }
+*/
+            if ((strcmp(insn[j].mnemonic, "call") == 0) &&
+                (f = lookup_fn(bin->extern_fns->head, insn[j].op_str)) != NULL) {
+                f->cnt += 1;
+            } 
 
-            if ( (bin->insts->head == NULL) || 
+            if ((bin->insts->head == NULL) || 
                     ((p = lookup_pair(bin->insts->head, insn[j].mnemonic)) == NULL)) {
                 p = (struct pair *) malloc(sizeof(struct pair));
                 p->cnt = 1;
-                p->name = insn[j].mnemonic;
+                p->name = strdup(insn[j].mnemonic);
                 push(bin->insts, p);
             } else {
                 p->cnt += 1;
             }
-
-            /*
-            if ((p = lookup_pair(bin->insts->head, insn[j].mnemonic)) != NULL) {
-                p->cnt += 1;
-            } else {
-                push(bin->insts, insn[j].mnemonic);
-            }
-            */
-
+        
         }
-        //cs_free(insn, i);
+        cs_free(insn, i);
     } else {
         printf("ERROR: Failed to disassemble given code!\n");
     }
@@ -207,6 +246,7 @@ void printinfo(struct binaryinfo *bi) {
     int cnt;
     struct node *l = bi->insts->head;
     struct pair *p;
+    struct fndata *f;
 
     printf("SHA1 Hash of .init Section: 0x");
     for (cnt = 0; cnt < SHA1; cnt++) {
@@ -229,10 +269,18 @@ void printinfo(struct binaryinfo *bi) {
         printf("No External Functions Present\n");
     } else {
         while (l != NULL) {
-            p = l->data;
-            printf("%s\t\t\t%d\n", p->name, p->cnt);
+            f = l->data;
+            printf("%s\t\t\t%d\n", f->name, f->cnt);
             l = l->next;
         }
+    }
+    
+    printf("------- Section Information -------\n");
+    l = bi->sections->head;
+    while (l != NULL) {
+        p = l->data;
+        printf("%s\t\tsize in bytes: %d\n", p->name, p->cnt);
+        l = l->next;
     }
 }
 
@@ -259,7 +307,7 @@ float calc_entropy(Elf_Data *data) {
     // sum each probability sqaured
     for (i = 0; i < 256; i++) {
         p = ((float) bytes[i] / data->d_size);
-        sum += (p * p);
+        sum += (p*p);
     }
 
     // e = -logb(sum)
@@ -269,18 +317,17 @@ float calc_entropy(Elf_Data *data) {
 int analyze(char *file, char *user, struct list *bl) {
     Elf *e;
     GElf_Ehdr ehdr;
-    GElf_Shdr shdr;
+    GElf_Shdr shdr, shdr_dsym, shdr_got, shdr_rela;
     Elf_Scn *scn;
-    Elf_Data *data;
-    GElf_Sym sym;
+    Elf_Data *rela_data, *txt_data, *dsym_data, *got_data;
 
     struct checksum_ctx *ctx;
     uint8_t hash[SHA1], payload[BLOCK];
     size_t shstrndx;
-    char *name, *symname;
-    int i, cnt, fd;
+    char *name;
+    int cnt, fd;
     
-    struct pair *ps, *pef;
+    struct pair *ps;
 
     // binary information struct
     struct binaryinfo *bin = (struct binaryinfo *) malloc(sizeof(struct binaryinfo));
@@ -298,9 +345,9 @@ int analyze(char *file, char *user, struct list *bl) {
     bin->e = 0;
 
     // list of strings, duplicates allowed
-    struct list *iargs = (struct list *) malloc(sizeof(struct list));
-    iargs->size = 0;
-    iargs->head = NULL;
+    struct list *fns = (struct list *) malloc(sizeof(struct list));
+    fns->size = 0;
+    fns->head = NULL;
 
     fd = open(file, O_RDONLY, 0);
 
@@ -344,38 +391,31 @@ int analyze(char *file, char *user, struct list *bl) {
         name = elf_strptr(e, shstrndx, shdr.sh_name);
 
         ps = malloc(sizeof(struct pair));
-        ps->name = name;
+        ps->name = strdup(name);
         ps->cnt = shdr.sh_size;
         push(bin->sections, ps);
 
-        // section is a symbol table
-        if (shdr.sh_type == SHT_SYMTAB) {
-            data = NULL;
-            elf_getdata(scn, data);
+        if (strcmp(name, ".dynsym") == 0) {
+            shdr_dsym = shdr;
+            dsym_data = elf_getdata(scn, NULL);            
+        }
 
-            // print the symbol names 
-            cnt = shdr.sh_size / shdr.sh_entsize;
-            for (i = 0; i < cnt; ++i) {
-                gelf_getsym(data, i, &sym);
-                symname = elf_strptr(e, shdr.sh_link, sym.st_name);
-                printf("sn: %s\n", symname);
-                if (symname != NULL) {
-                    printf("sn: %s\n", symname);
-                    //update_binrecord(bin->extern_fns, symname);
-                    pef = (struct pair *) malloc(sizeof(struct pair));
-                    pef->cnt = 0;
-                    pef->name = symname;
-                    push(bin->extern_fns, pef); 
-                }
-            }
+        if (strcmp(name, ".rela.plt") == 0) {
+            shdr_rela = shdr;
+            rela_data = elf_getdata(scn, NULL);            
+        }
+
+        if (strcmp(name, ".got") == 0) {
+            shdr_got = shdr;
+            got_data = elf_getdata(scn, NULL);            
         }
 
         // .text section 
         if (strcmp(name, ".text") == 0) {
-            data = elf_getdata(scn, NULL);
+            txt_data = elf_getdata(scn, NULL);
 
             // for each individual byte, calc entropy (not efficient but oh whale)
-            bin->e = calc_entropy(data);
+            bin->e = calc_entropy(txt_data);
 
             // hash .text in BLOCK size chunks
             ctx = checksum_create(NULL, 0);    
@@ -387,15 +427,11 @@ int analyze(char *file, char *user, struct list *bl) {
             read(fd, payload, (shdr.sh_size - cnt)); 
             checksum_finish(ctx, payload, (shdr.sh_size - cnt), hash);
             memcpy(bin->hash, hash, SHA1); 
-
-            // disassemble with capstone
-            disassem_insts(data, bin, iargs);
         }
     }
 
-    // find function count
-    count_fn_calls(bin, iargs);
-
+    // disassemble with capstone
+    disassem_insts(e, bin, rela_data, txt_data, got_data, dsym_data, &shdr_got, &shdr_dsym, &shdr_rela);
     // print info about the binary file we collected
     printinfo(bin);
     // add this info to the binary file list
@@ -423,38 +459,6 @@ int invalid_creds(char *uid, char *password, struct list *creds) {
     return 0;
 }
 
-/* FILE FORMAT
-*  key (32 bytes)
- * iv (16 bytes)
- *
- * num users            (1)
- * for every user:
- *     strlen(user)     (1)
- *     username         (len)
- *
- * for every binary in lb:
- *      j = strlen(uid)     (1)
- *      uid                 (j)
- *      n bytes in bin name (1)
- *      bin name (n)
- *      sha1 hash (16)
- *      entropy (4)
- *      number of opcodes (4)
- *      for every opcode:
- *              m bytes in opcode name (1)
- *              opcode name (m)
- *              opcode count (4)
- *      number of extern fns (4)
- *      for every extern fn:
- *              k bytes in fn name (1)
- *              fn name (k)
- *              fn count (4)
- *      number of sections (4)                                                
- *      for every section:                                                                                         
- *              l bytes in section (1)                                          
- *              section name (l)                                                     
- *              section size in bytes (4) 
- */
 
 void store(char *file, struct list *bl, struct list *creds) {
 
@@ -466,6 +470,7 @@ void store(char *file, struct list *bl, struct list *creds) {
   
     struct binaryinfo *b;
     struct pair *p;
+    struct fndata *f;
     struct node *n;
     struct cred *c;
 
@@ -489,11 +494,11 @@ void store(char *file, struct list *bl, struct list *creds) {
 
         pt[idx++] = userlen;
         memcpy(pt+idx, c->user, userlen);
-        idx+=userlen;
+        idx += userlen;
 
         pt[idx++] = passlen;
         memcpy(pt+idx, c->pass, passlen);
-        idx+=passlen;
+        idx += passlen;
 
         curr = curr->next;
     }
@@ -508,11 +513,11 @@ void store(char *file, struct list *bl, struct list *creds) {
         b = curr->data;
         uid_len = strlen(b->uid);
         bin_name_len = strlen(b->name);
-        pt = realloc(pt, idx+uid_len+bin_name_len+SHA1+4);
+        pt = realloc(pt, idx+uid_len+bin_name_len+SHA1+10);
 
         pt[idx++] = uid_len;
         memcpy(pt+idx, b->uid, uid_len);
-        idx+=uid_len;
+        idx += uid_len;
 
         pt[idx++] = bin_name_len;
         memcpy(pt+idx, b->name, bin_name_len);
@@ -522,12 +527,12 @@ void store(char *file, struct list *bl, struct list *creds) {
         idx+=SHA1;
 
         memcpy(pt+idx, &(b->e), 4);
-        idx+=4;
+        idx += 4;
+        //idx = incrementByFour(idx);
 
         // opcode info                                                          
-        pt = realloc(pt, idx+4);
         memcpy(pt+idx, &(b->insts->size), 4);
-        idx+=4; 
+        idx += 4;
 
         n = b->insts->head;
         for (i = 0; i < b->insts->size; i++) {
@@ -536,9 +541,9 @@ void store(char *file, struct list *bl, struct list *creds) {
             pt = realloc(pt, idx+len+5);
             pt[idx++] = len;
             memcpy(pt+idx, p->name, len);
-            idx+=len;       
+            idx += len;       
             memcpy(pt+idx, &(p->cnt), 4);                                        
-            idx+=4;        
+            idx += 4;        
             n = n->next;
         }    
 
@@ -549,21 +554,21 @@ void store(char *file, struct list *bl, struct list *creds) {
 
         n = b->extern_fns->head;
         for (i = 0; i < b->extern_fns->size; i++) {
-            p = n->data;
-            len = strlen(p->name);                                        
+            f = n->data;
+            len = strlen(f->name);                                        
             pt = realloc(pt, idx+len+5);                                        
             pt[idx++] = len;                                                    
-            memcpy(pt+idx, p->name, len);                                 
-            idx+=len;                                                           
-            memcpy(pt+idx, &(p->cnt), 4);                                        
-            idx+=4;                                                             
+            memcpy(pt+idx, f->name, len);                                 
+            idx += len;                                                           
+            memcpy(pt+idx, &(f->cnt), 4);                                        
+            idx += 4;                                                             
             n = n->next; 
         }
 
         // sections info
         pt = realloc(pt, idx+4);                                                
         memcpy(pt+idx, &(b->sections->size), 4);                               
-        idx+=4;  
+        idx += 4;  
         
         n = b->sections->head;
         for (i = 0; i < b->sections->size; i++) {
@@ -572,9 +577,9 @@ void store(char *file, struct list *bl, struct list *creds) {
             pt = realloc(pt, idx+len+5);                                        
             pt[idx++] = len;                                                    
             memcpy(pt+idx, p->name, len);                                 
-            idx+=len;      
+            idx += len;      
             memcpy(pt+idx, &(p->cnt), 4);                                        
-            idx+=4;                                                             
+            idx += 4;                                                             
             n = n->next; 
         }
 
@@ -585,27 +590,10 @@ void store(char *file, struct list *bl, struct list *creds) {
     ct = malloc(idx+16);
     es = encrypt(pt, idx, key, iv, ct);
     fwrite(ct, es, 1, fp);
+    free(pt);
+    free(ct);
 }
 
-/* READ FORMAT
- * iv (16 bytes)
- * 
- * for every binary in lb:
- *      n bytes in bin name (1)
- *      bin name (n)
- *      sha1 hash (16)
- *      entropy (4)
- *      number of opcodes (2)
- *      for every opcode:
- *              m bytes in opcode name (1)
- *              opcode name (m)
- *              opcode cont (4)
- *      number of extern fns (2)
- *      for every extern fn:
- *              k bytes in fn name (1)
- *              fn name (k)
- *              fn count (4)
- */
 
 /*
  * bl = list of binary information structs we are going to fill
@@ -613,16 +601,13 @@ void store(char *file, struct list *bl, struct list *creds) {
  */
 void load(struct list *bl, struct list *creds) {
     FILE *fp;
-    uint8_t key[KEYSIZE], iv[16];
+    uint8_t key[KEYSIZE], iv[IVSIZE];
     int passlen, userlen, fs, num_users, i, idx, uid_len;
-    char *username = NULL, *password = NULL;
     struct pair *p;
-    int num_insts, inst_len, inst_cnt;
-    char *inst_name = NULL;
-    int num_fns, fn_len, fn_cnt;
-    char *fn_name = NULL;
+    int num_insts, inst_len;
+    int num_fns, fn_len;
     int num_sections, section_name_len, section_size;
-    char *section_name = NULL;
+    struct fndata *f;
 
     // if the log file does not exist then do nothing                           
     if ((fp = fopen(LOGFILE, "r")) == NULL) {                                   
@@ -636,13 +621,13 @@ void load(struct list *bl, struct list *creds) {
     fseek(fp, 0L, SEEK_SET);
 
     fread(key, KEYSIZE, 1, fp);
-    fread(iv, SHA1, 1, fp);
-    fs -= KEYSIZE+SHA1;
+    fread(iv, IVSIZE, 1, fp);
+    fs -= KEYSIZE+IVSIZE;
 
     uint8_t ct[fs], pt[fs];
 
     fread(ct, fs, 1, fp);
-    if (decrypt(ct, fs, key, iv, pt) <= 0) {
+    if ((fs = decrypt(ct, fs, key, iv, pt)) <= 0) {
         return;
     }
 
@@ -650,18 +635,16 @@ void load(struct list *bl, struct list *creds) {
 
     // read in user information
     num_users = pt[idx++];
-    creds->size = num_users;
     for (i = 0; i < num_users; i++) {
-        userlen = pt[idx++];           
-        memcpy(username, pt+idx, userlen); 
-        idx+=userlen;
-        passlen = pt[(idx++)];
-        memcpy(password, pt+idx, passlen);
-        idx+=passlen;
-
         struct cred *c = (struct cred *) malloc(sizeof(struct cred));
-        c->user = username;
-        c->pass = password;
+
+        userlen = pt[idx++];           
+        c->user = strndup((char*) pt+idx, userlen);
+        idx += userlen;
+        passlen = pt[idx++];
+        c->pass = strndup((char*) pt+idx, passlen);
+        idx += passlen;
+
         push(creds, c);
     }
 
@@ -673,18 +656,18 @@ void load(struct list *bl, struct list *creds) {
         struct binaryinfo *bin = (struct binaryinfo *) malloc(sizeof(struct binaryinfo));
 
         uid_len = pt[idx++];
-        memcpy(bin->uid, pt+idx, uid_len);
-        idx+=uid_len;
+        bin->uid = strndup((char*) pt+idx, uid_len);
+        idx += uid_len;
 
         bin_name_len = pt[idx++];
-        memcpy(bin->name, pt+idx, bin_name_len); 
+        bin->name = strndup((char*) pt+idx, bin_name_len);
         idx += bin_name_len;
 
         memcpy(&(bin->hash), pt+idx, SHA1);
-        idx+=SHA1;
+        idx += SHA1;
 
         memcpy(&(bin->e), pt+idx, 4);
-        idx+=4;
+        idx += 4;
 
         // opcode info
         bin->insts = (struct list *) malloc(sizeof(struct list));
@@ -692,16 +675,15 @@ void load(struct list *bl, struct list *creds) {
         bin->insts->size = 0;
 
         memcpy(&num_insts, pt+idx, 4);
-        idx+=4;
+        idx += 4;
         for (i = 0; i < num_insts; i++) {
             p = (struct pair *) malloc(sizeof(struct pair));
             inst_len = pt[idx++];
-            memcpy(inst_name, pt+idx, inst_len);
-            idx+=inst_len;
-            memcpy(&inst_cnt, pt+idx, 4);
+            p->name = strndup((char*) pt+idx, inst_len);
+            idx += inst_len;
+            p->cnt = *((int*)(pt+idx));
             idx+=4;
-            p->name = inst_name;
-            p->cnt = inst_cnt;
+
             push(bin->insts, p);
         }
 
@@ -711,17 +693,16 @@ void load(struct list *bl, struct list *creds) {
         bin->extern_fns->size = 0;
 
         memcpy(&num_fns, pt+idx, 4);
-        idx+=4;
+        idx += 4;
         for (i = 0; i < num_fns; i++) {
-            p = (struct pair *) malloc(sizeof(struct pair));
+            f = (struct fndata *) malloc(sizeof(struct fndata));
             fn_len = pt[idx++];
-            memcpy(fn_name, pt+idx, fn_len);
-            idx+=fn_len;
-            memcpy(&fn_cnt, pt+idx, 4);
-            idx+=4;
-            p->name = fn_name;
-            p->cnt = fn_cnt;
-            push(bin->extern_fns, p);
+            f->name = strndup((char*) pt+idx, fn_len);
+            idx += fn_len;
+            f->cnt = *((int*)(pt+idx));
+            idx += 4;
+            f->addr = NULL;
+            push(bin->extern_fns, f);
         }
 
         // section info
@@ -730,16 +711,15 @@ void load(struct list *bl, struct list *creds) {
         bin->sections->size = 0;
 
         memcpy(&num_sections, pt+idx, 4);
-        idx+=4;
+        idx += 4;
         for (i = 0; i < num_sections; i++) {
             p = (struct pair *) malloc(sizeof(struct pair));
             section_name_len = pt[idx++];
-            memcpy(section_name, pt+idx, section_name_len);
-            idx+=fn_len;
+            p->name = strndup((char*) pt+idx, section_name_len);
+            idx += fn_len;
+            p->cnt = *((int*)pt+idx);
             memcpy(&section_size, pt+idx, 4);
-            idx+=4;
-            p->name = section_name;
-            p->cnt = section_size;
+            idx += 4;
             push(bin->sections, p);
         }
 
@@ -756,7 +736,7 @@ void load(struct list *bl, struct list *creds) {
 int main(int argc, char *argv[]) {
     // binary scanner should be run with a binary file as an argument
     int opt, index, admin = 0;
-    char *passwd, *task, *file, *uid;
+    char *passwd = NULL, *task = NULL, *file = NULL, *uid = NULL;
     struct binaryinfo *b;
 
     struct list *bl = malloc(sizeof(struct list));
@@ -767,6 +747,7 @@ int main(int argc, char *argv[]) {
     creds->size = 0;
     creds->head = NULL;
 
+    // TODO: check username and password len <= 255
     // argument parsing with getopt
     while((opt = getopt(argc, argv, "au:p:f:t:")) != -1) {
         switch (opt) {
@@ -801,20 +782,24 @@ int main(int argc, char *argv[]) {
                    exit(1);
         }
     }
+    //printf("a=%d, u=%s, p=%s, f=%s, t=%s\n", admin, uid, passwd, file, task);
 
     for (index = optind; index < argc; index++) {
         printf("Non-option argument %s\n", argv[index]);
     }
 
-    if (uid == NULL || passwd == NULL || file == NULL || (!admin && uid == NULL)) {
+    if (passwd == NULL || file == NULL || task == NULL) {
         printf("Usage: ./binscan [-u <username> | -a] -p <password> -f <file> -t <type>\n");
-        printf("possible inputs for -t : lookup, delete, analyze\n");
         exit(1);
     }
 
     if (admin && strcmp(passwd, PASS) != 0) {
         printf("Incorrect Admin Password. Try Again!\n");
         exit(1);
+    } 
+
+    if (admin) {
+        uid = "admin";
     }
 
     // read in file

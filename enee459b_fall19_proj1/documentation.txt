@@ -1,19 +1,67 @@
-LOG FILE FORMAT
+BINSCAN DOCUMENTATION - LAUREN KOSUB
+
+binscan is a command line utility that reads elf64 files with intel ISA
+and analyzes / stores binary information.
+
+to create the binary, run make in the home directory (where the Makefile is located).
+
+Usage: ./binscan [-u <username> | -a] -p <password> -f <file> -t <type>
+command line arguments:
+    -u <user> : user is a string input that serves to authenticate / identify
+                a user. either specify -u or -a, not both.
+    -a        : user is admin 
+    -p <pass> : password is a string that serves to authenticate the user or admin 
+    -f <file> : file is the name of the binary file you want to process
+    -t <type> : type is a string input that specifies what the user wants to 
+                accomplish. str can either be equal to "lookup", "analyze", or
+                "delete". 
+
+                When type is "analyze", the binary file <file> will 
+                be scanned and information concerning the contents of the 
+                binary will be printed to stdin and stored in the logfile for
+                future reading.
+
+                when type is "lookup", the program will read the log file and look
+                for a previous output of analyze. If this binary <file> was 
+                previously analyzed by the user, the binary information will
+                print to stdin. else the program will do nothing.
+
+                when type is "delete", the program will read the log file and
+                delete the binary analysis entry that corresponds to the binary
+                with name <file>, Must be admin to delete. If not admin, nothing
+                will happen.
+
+examples of commands:
+./binscan -u lauren -p kosub -f example -t analyze
+lauren with passwd = kosub will analyze the file "example"
+
+./binscan -a -p <adminspasswd> -f example -t analyze
+admin will analyze the file example given that adminpasswd is correct
+
+./binscan -u lauren -p nope -f example -t lookup
+this command will not allow lauren to lookup information she has written 
+becuase somebody is posing as her since she did not authenticate
+
+./binscan -a -p <adminspasswd> -f example -t analyze
+admin can delete, but normal users cannot
+
+./binscan -u lauren -p kosub -f notabin.txt -t lookup
+will not analyze anything since the file is not an elf file.
+
+--------------- LOG FILE FORMAT ---------------
 KEY (32 BITS)
 IV (16 BITS)
-ADMIN UID
----------------------------------
-SIZE OF USER SECTION
-USERID (1 BYTE)
-USERKEY (16 BYTES)
-... 
-USERID (1 BYTE)
-USERKEY (16 BYTES)
----------------------------------
 
----------------------------------
-BIN USERID
-BIN INFO
+ENCRYPTED W/ KEY AND IV
+...............................................
+SIZE OF USER SECTION
+for every user currently logged:
+USERID (1 BYTE)         
+USERKEY (16 BYTES)      
+...                    
+USERID (1 BYTE)        
+USERKEY (16 BYTES)      
+
 for every binary in lb:
      n bytes in bin name (1)
      bin name (n)
@@ -29,27 +77,10 @@ for every binary in lb:
              k bytes in fn name (1)
              fn name (k)
              fn count (4)
-----------------------------------
-                .
-                .
-                .
-
----------------------------------
-BIN USERID
-BIN INFO
-for every binary in lb:
-     n bytes in bin name (1)
-     bin name (n)
-     sha1 hash (16)
-     entropy (4)
-     number of opcodes (2)
-     for every opcode:
-             m bytes in opcode name (1)
-             opcode name (m)
-             opcode cont (4)
-     number of extern fns (2)
-     for every extern fn:
-             k bytes in fn name (1)
-             fn name (k)
-             fn count (4)
-----------------------------------
+     number of sections (2)
+     for every section:
+             l bytes in section name (1)
+             section name (l)
+             size of section in bytes (4)
+.................................................
+---------------------------------------------------
